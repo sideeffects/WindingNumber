@@ -1154,7 +1154,7 @@ void BVH<N>::split(const Box<T,NAXES>& axes_minmax, const BOX_TYPE* boxes, SRC_I
                     parallel_counts[dest_array_start+i] = span_counts[i];
                 }
             }
-        });
+        }, 0, 1);
 
         // Combine the partial results
         for (INT_TYPE taski = 0; taski < ntasks; ++taski) {
