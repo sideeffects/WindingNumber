@@ -342,9 +342,13 @@ void BVH<N>::createTrivialIndices(SRC_INT_TYPE* indices, const INT_TYPE n) noexc
         }
     }
     else {
-        UTparallelFor(UT_BlockedRange<INT_TYPE>(0,n), [indices](const UT_BlockedRange<INT_TYPE>& r) {
-            for (INT_TYPE i = r.begin(), end = r.end(); i != end; ++i) {
-                indices[i] = i;
+        UTparallelFor(UT_BlockedRange<INT_TYPE>(0,ntasks), [indices,ntasks,n](const UT_BlockedRange<INT_TYPE>& r) {
+            for (INT_TYPE taski = r.begin(), taskend = r.end(); taski != taskend; ++taski) {
+                INT_TYPE start = (taski * exint(n))/ntasks;
+                INT_TYPE end = ((taski+1) * exint(n))/ntasks;
+                for (INT_TYPE i = start; i != end; ++i) {
+                    indices[i] = i;
+                }
             }
         }, 0, 1);
     }
@@ -520,11 +524,13 @@ void BVH<N>::initNode(UT_Array<Node>& nodes, Node &node, const Box<T,NAXES>& axe
                     const UT_Array<Node>& local_nodes = parallel_nodes[counted_parallel];
                     ++counted_parallel;
                     INT_TYPE n = local_nodes.size();
-                    nodes.bumpSize(local_nodes_start + n);
+                    nodes.bumpCapacity(local_nodes_start + n);
+                    nodes.setSizeNoInit(local_nodes_start + n);
                     nodes[local_nodes_start-1] = child_node;
                 }
                 else {
-                    nodes.bumpSize(local_nodes_start + 1);
+                    nodes.bumpCapacity(local_nodes_start + 1);
+                    nodes.setSizeNoInit(local_nodes_start + 1);
                     initNode<H>(nodes, nodes[local_nodes_start], sub_boxes[i], boxes, sub_indices[i], sub_nboxes);
                 }
             }
@@ -539,7 +545,8 @@ void BVH<N>::initNode(UT_Array<Node>& nodes, Node &node, const Box<T,NAXES>& axe
             if (sub_nboxes != 1) {
                 INT_TYPE local_nodes_start = nodes.size();
                 node.child[i] = Node::markInternal(local_nodes_start);
-                nodes.bumpSize(local_nodes_start + 1);
+                nodes.bumpCapacity(local_nodes_start + 1);
+                nodes.setSizeNoInit(local_nodes_start + 1);
                 initNode<H>(nodes, nodes[local_nodes_start], sub_boxes[i], boxes, sub_indices[i], sub_nboxes);
             }
         }
@@ -711,11 +718,13 @@ void BVH<N>::initNodeReorder(UT_Array<Node>& nodes, Node &node, const Box<T,NAXE
                     const UT_Array<Node>& local_nodes = parallel_nodes[counted_parallel];
                     ++counted_parallel;
                     INT_TYPE n = local_nodes.size();
-                    nodes.bumpSize(local_nodes_start + n);
+                    nodes.bumpCapacity(local_nodes_start + n);
+                    nodes.setSizeNoInit(local_nodes_start + n);
                     nodes[local_nodes_start-1] = child_node;
                 }
                 else {
-                    nodes.bumpSize(local_nodes_start + 1);
+                    nodes.bumpCapacity(local_nodes_start + 1);
+                    nodes.setSizeNoInit(local_nodes_start + 1);
                     initNodeReorder<H>(nodes, nodes[local_nodes_start], sub_boxes[i], boxes, sub_indices[i], sub_nboxes,
                         indices_offset+(sub_indices[i]-sub_indices[0]), max_items_per_leaf);
                 }
@@ -731,7 +740,8 @@ void BVH<N>::initNodeReorder(UT_Array<Node>& nodes, Node &node, const Box<T,NAXE
             if (sub_nboxes > max_items_per_leaf) {
                 INT_TYPE local_nodes_start = nodes.size();
                 node.child[i] = Node::markInternal(local_nodes_start);
-                nodes.bumpSize(local_nodes_start + 1);
+                nodes.bumpCapacity(local_nodes_start + 1);
+                nodes.setSizeNoInit(local_nodes_start + 1);
                 initNodeReorder<H>(nodes, nodes[local_nodes_start], sub_boxes[i], boxes, sub_indices[i], sub_nboxes,
                     indices_offset+(sub_indices[i]-sub_indices[0]), max_items_per_leaf);
             }
