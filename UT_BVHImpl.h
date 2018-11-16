@@ -44,6 +44,30 @@ namespace HDK_Sample {
 namespace UT {
 
 template<typename T,uint NAXES>
+SYS_FORCE_INLINE bool utBoxExclude(const UT::Box<T,NAXES>& box) noexcept {
+    bool has_nan_or_inf = !SYSisFinite(box[0][0]);
+    has_nan_or_inf |= !SYSisFinite(box[0][1]);
+    for (uint axis = 1; axis < NAXES; ++axis)
+    {
+        has_nan_or_inf |= !SYSisFinite(box[axis][0]);
+        has_nan_or_inf |= !SYSisFinite(box[axis][1]);
+    }
+    return has_nan_or_inf;
+}
+template<uint NAXES>
+SYS_FORCE_INLINE bool utBoxExclude(const UT::Box<fpreal32,NAXES>& box) noexcept {
+    const int32 *pboxints = reinterpret_cast<const int32*>(&box);
+    // Fast check for NaN or infinity: check if exponent bits are 0xFF.
+    bool has_nan_or_inf = ((pboxints[0] & 0x7F800000) == 0x7F800000);
+    has_nan_or_inf |= ((pboxints[1] & 0x7F800000) == 0x7F800000);
+    for (uint axis = 1; axis < NAXES; ++axis)
+    {
+        has_nan_or_inf |= ((pboxints[2*axis] & 0x7F800000) == 0x7F800000);
+        has_nan_or_inf |= ((pboxints[2*axis + 1] & 0x7F800000) == 0x7F800000);
+    }
+    return has_nan_or_inf;
+}
+template<typename T,uint NAXES>
 SYS_FORCE_INLINE T utBoxCenter(const UT::Box<T,NAXES>& box, uint axis) noexcept {
     const T* v = box.vals[axis];
     return v[0] + v[1];
@@ -53,6 +77,22 @@ struct ut_BoxCentre {
     constexpr static uint scale = 2;
 };
 template<typename T,uint NAXES,bool INSTANTIATED>
+SYS_FORCE_INLINE T utBoxExclude(const UT_FixedVector<T,NAXES,INSTANTIATED>& position) noexcept {
+    bool has_nan_or_inf = !SYSisFinite(position[0]);
+    for (uint axis = 1; axis < NAXES; ++axis)
+        has_nan_or_inf |= !SYSisFinite(position[axis]);
+    return has_nan_or_inf;
+}
+template<uint NAXES,bool INSTANTIATED>
+SYS_FORCE_INLINE bool utBoxExclude(const UT_FixedVector<fpreal32,NAXES,INSTANTIATED>& position) noexcept {
+    const int32 *ppositionints = reinterpret_cast<const int32*>(&position);
+    // Fast check for NaN or infinity: check if exponent bits are 0xFF.
+    bool has_nan_or_inf = ((ppositionints[0] & 0x7F800000) == 0x7F800000);
+    for (uint axis = 1; axis < NAXES; ++axis)
+        has_nan_or_inf |= ((ppositionints[axis] & 0x7F800000) == 0x7F800000);
+    return has_nan_or_inf;
+}
+template<typename T,uint NAXES,bool INSTANTIATED>
 SYS_FORCE_INLINE T utBoxCenter(const UT_FixedVector<T,NAXES,INSTANTIATED>& position, uint axis) noexcept {
     return position[axis];
 }
@@ -60,14 +100,124 @@ template<typename T,uint NAXES,bool INSTANTIATED>
 struct ut_BoxCentre<UT_FixedVector<T,NAXES,INSTANTIATED>> {
     constexpr static uint scale = 1;
 };
-template<typename T>
-struct ut_BoxCentre<UT_Vector2T<T>> {
-    constexpr static uint scale = 1;
-};
-template<typename T>
-struct ut_BoxCentre<UT_Vector3T<T>> {
-    constexpr static uint scale = 1;
-};
+
+template<typename BOX_TYPE,typename SRC_INT_TYPE,typename INT_TYPE>
+INT_TYPE utExcludeNaNInfBoxIndices(const BOX_TYPE* boxes, SRC_INT_TYPE* indices, INT_TYPE& nboxes) noexcept 
+{
+    constexpr INT_TYPE PARALLEL_THRESHOLD = 65536;
+    INT_TYPE ntasks = 1;
+    if (nboxes >= PARALLEL_THRESHOLD) 
+    {
+        INT_TYPE nprocessors = UT_Thread::getNumProcessors();
+        ntasks = (nprocessors > 1) ? SYSmin(4*nprocessors, nboxes/(PARALLEL_THRESHOLD/2)) : 1;
+    }
+    if (ntasks == 1) 
+    {
+        // Serial: easy case; just loop through.
+
+        const SRC_INT_TYPE* indices_end = indices + nboxes;
+
+        // Loop through forward once
+        SRC_INT_TYPE* psrc_index = indices;
+        for (; psrc_index != indices_end; ++psrc_index) 
+	{
+            const bool exclude = utBoxExclude(boxes[*psrc_index]);
+            if (exclude)
+                break;
+        }
+        if (psrc_index == indices_end)
+            return 0;
+
+        // First NaN or infinite box
+        SRC_INT_TYPE* nan_start = psrc_index;
+        for (++psrc_index; psrc_index != indices_end; ++psrc_index) 
+	{
+            const bool exclude = utBoxExclude(boxes[*psrc_index]);
+            if (!exclude) 
+	    {
+                *nan_start = *psrc_index;
+                ++nan_start;
+            }
+        }
+        nboxes = nan_start-indices;
+        return indices_end - nan_start;
+    }
+
+    // Parallel: hard case.
+    // 1) Collapse each of ntasks chunks and count number of items to exclude
+    // 2) Accumulate number of items to exclude.
+    // 3) If none, return.
+    // 4) Copy non-NaN chunks
+
+    UT_SmallArray<INT_TYPE> nexcluded;
+    nexcluded.setSizeNoInit(ntasks);
+    UTparallelFor(UT_BlockedRange<INT_TYPE>(0,ntasks), [boxes,indices,ntasks,nboxes,&nexcluded](const UT_BlockedRange<INT_TYPE>& r) 
+    {
+        for (INT_TYPE taski = r.begin(), task_end = r.end(); taski < task_end; ++taski)
+        {
+            SRC_INT_TYPE* indices_start = indices + (taski*exint(nboxes))/ntasks;
+            const SRC_INT_TYPE* indices_end = indices + ((taski+1)*exint(nboxes))/ntasks;
+            SRC_INT_TYPE* psrc_index = indices_start;
+            for (; psrc_index != indices_end; ++psrc_index)
+            {
+                const bool exclude = utBoxExclude(boxes[*psrc_index]);
+                if (exclude)
+                    break;
+            }
+            if (psrc_index == indices_end) 
+	    {
+                nexcluded[taski] = 0;
+                continue;
+            }
+
+            // First NaN or infinite box
+            SRC_INT_TYPE* nan_start = psrc_index;
+            for (++psrc_index; psrc_index != indices_end; ++psrc_index) 
+	    {
+                const bool exclude = utBoxExclude(boxes[*psrc_index]);
+                if (!exclude) 
+		{
+                    *nan_start = *psrc_index;
+                    ++nan_start;
+                }
+            }
+            nexcluded[taski] = indices_end - nan_start;
+        }
+    }, 0, 1);
+
+    // Accumulate
+    INT_TYPE total_excluded = nexcluded[0];
+    for (INT_TYPE taski = 1; taski < ntasks; ++taski) 
+    {
+        total_excluded += nexcluded[taski];
+    }
+
+    if (total_excluded == 0)
+        return 0;
+
+    // TODO: Parallelize this part, if it's a bottleneck and we care about cases with NaNs or infinities.
+
+    INT_TYPE taski = 0;
+    while (nexcluded[taski] == 0) 
+    {
+        ++taski;
+    }
+
+    SRC_INT_TYPE* dest_indices = indices + ((taski+1)*exint(nboxes))/ntasks - nexcluded[taski];
+
+    SRC_INT_TYPE* dest_end = indices + nboxes - total_excluded;
+    for (++taski; taski < ntasks && dest_indices < dest_end; ++taski)
+    {
+        const SRC_INT_TYPE* psrc_index = indices + (taski*exint(nboxes))/ntasks;
+        const SRC_INT_TYPE* psrc_end = indices + ((taski+1)*exint(nboxes))/ntasks - nexcluded[taski];
+        INT_TYPE count = psrc_end - psrc_index;
+	// Note should be memmove as it is overlapping.
+	memmove(dest_indices, psrc_index, sizeof(SRC_INT_TYPE)*count);
+        dest_indices += count;
+    }
+    nboxes -= total_excluded;
+    return total_excluded;
+}
 
 template<uint N>
 template<BVH_Heuristic H,typename T,uint NAXES,typename BOX_TYPE,typename SRC_INT_TYPE>
@@ -80,7 +230,7 @@ void BVH<N>::init(const BOX_TYPE* boxes, const INT_TYPE nboxes, SRC_INT_TYPE* in
 
 template<uint N>
 template<BVH_Heuristic H,typename T,uint NAXES,typename BOX_TYPE,typename SRC_INT_TYPE>
-void BVH<N>::init(const Box<T,NAXES>& axes_minmax, const BOX_TYPE* boxes, const INT_TYPE nboxes, SRC_INT_TYPE* indices, bool reorder_indices, INT_TYPE max_items_per_leaf) noexcept {
+void BVH<N>::init(Box<T,NAXES> axes_minmax, const BOX_TYPE* boxes, INT_TYPE nboxes, SRC_INT_TYPE* indices, bool reorder_indices, INT_TYPE max_items_per_leaf) noexcept {
     // Clear the tree in advance to save memory.
     myRoot.reset();
 
@@ -95,6 +245,18 @@ void BVH<N>::init(const Box<T,NAXES>& axes_minmax, const BOX_TYPE* boxes, const 
         indices = local_indices.array();
         createTrivialIndices(indices, nboxes);
     }
+
+    // Exclude any boxes with NaNs or infinities by shifting down indices
+    // over the bad box indices and updating nboxes.
+    INT_TYPE nexcluded = utExcludeNaNInfBoxIndices(boxes, indices, nboxes);
+    if (nexcluded != 0) {
+        if (nboxes == 0) {
+            myNumNodes = 0;
+            return;
+        }
+        computeFullBoundingBox(axes_minmax, boxes, nboxes, indices);
+    }
+
     UT_Array<Node> nodes;
     // Preallocate an overestimate of the number of nodes needed.
     nodes.setCapacity(nodeEstimate(nboxes));
@@ -1260,11 +1422,11 @@ void BVH<N>::split(const Box<T,NAXES>& axes_minmax, const BOX_TYPE* boxes, SRC_I
         nthElement<T>(boxes,indices,indices+nboxes,max_axis,nth_index);//,min_pivotx2,max_pivotx2);
 
         split_indices = nth_index;
-        Box<T,NAXES> left_box = boxes[indices[0]];
+        Box<T,NAXES> left_box(boxes[indices[0]]);
         for (SRC_INT_TYPE* left_indices = indices+1; left_indices < nth_index; ++left_indices) {
             left_box.combine(boxes[*left_indices]);
         }
-        Box<T,NAXES> right_box = boxes[nth_index[0]];
+        Box<T,NAXES> right_box(boxes[nth_index[0]]);
         for (SRC_INT_TYPE* right_indices = nth_index+1; right_indices < indices_end; ++right_indices) {
             right_box.combine(boxes[*right_indices]);
         }
@@ -1304,11 +1466,11 @@ void BVH<N>::split(const Box<T,NAXES>& axes_minmax, const BOX_TYPE* boxes, SRC_I
             --split_indices;
         }
 
-        Box<T,NAXES> left_box = boxes[indices[0]];
+        Box<T,NAXES> left_box(boxes[indices[0]]);
         for (SRC_INT_TYPE* left_indices = indices+1; left_indices < split_indices; ++left_indices) {
             left_box.combine(boxes[*left_indices]);
         }
-        Box<T,NAXES> right_box = boxes[split_indices[0]];
+        Box<T,NAXES> right_box(boxes[split_indices[0]]);
         for (SRC_INT_TYPE* right_indices = split_indices+1; right_indices < indices_end; ++right_indices) {
             right_box.combine(boxes[*right_indices]);
         }
