@@ -363,26 +363,39 @@ public:
         }
     };
 private:
-    std::unique_ptr<Node[]> myRoot;
+    struct FreeDeleter {
+        SYS_FORCE_INLINE void operator()(Node* p) const {
+            if (p) {
+                // The pointer was allocated with malloc by UT_Array,
+                // so it must be freed with free.
+                free(p);
+            }
+        }
+    };
+
+    std::unique_ptr<Node[],FreeDeleter> myRoot;
     INT_TYPE myNumNodes;
 public:
-    BVH() noexcept : myRoot(nullptr), myNumNodes(0) {}
+    SYS_FORCE_INLINE BVH() noexcept : myRoot(nullptr), myNumNodes(0) {}
 
     template<BVH_Heuristic H,typename T,uint NAXES,typename BOX_TYPE,typename SRC_INT_TYPE=INT_TYPE>
     void init(const BOX_TYPE* boxes, const INT_TYPE nboxes, SRC_INT_TYPE* indices=nullptr, bool reorder_indices=false, INT_TYPE max_items_per_leaf=1) noexcept;
 
     template<BVH_Heuristic H,typename T,uint NAXES,typename BOX_TYPE,typename SRC_INT_TYPE=INT_TYPE>
-    void init(const Box<T,NAXES>& axes_minmax, const BOX_TYPE* boxes, const INT_TYPE nboxes, SRC_INT_TYPE* indices=nullptr, bool reorder_indices=false, INT_TYPE max_items_per_leaf=1) noexcept;
+    void init(Box<T,NAXES> axes_minmax, const BOX_TYPE* boxes, INT_TYPE nboxes, SRC_INT_TYPE* indices=nullptr, bool reorder_indices=false, INT_TYPE max_items_per_leaf=1) noexcept;
 
+    SYS_FORCE_INLINE
     INT_TYPE getNumNodes() const noexcept
     {
         return myNumNodes;
     }
+    SYS_FORCE_INLINE
     const Node *getNodes() const noexcept
     {
         return myRoot.get();
     }
 
+    SYS_FORCE_INLINE
     void clear() noexcept {
         myRoot.reset();
         myNumNodes = 0;
