@@ -35,20 +35,23 @@
     #pragma warning(disable:4799)
 #endif
 
+#include <simde/x86/sse.h>
+#include <simde/x86/sse4.1.h>
+
+typedef __m128 v4sf;
+typedef __m128i v4si;
+
 #define CPU_HAS_SIMD_INSTR	1
 #define VM_SSE_STYLE		1
-
-#include <emmintrin.h>
-typedef __m128	v4sf;
-typedef __m128i	v4si;
-
-#if defined(__SSE4_1__)
 #define VM_SSE41_STYLE		1
-#include <smmintrin.h>
-#endif
 
 #if defined(_MSC_VER)
     #pragma warning(pop)
+#endif
+
+// Recent GCC define the macro in x86intrin.h
+#ifndef _MM_MK_INSERTPS_NDX
+#define _MM_MK_INSERTPS_NDX(srcField, dstField, zeroMask) (((srcField)<<6) | ((dstField)<<4) | (zeroMask))
 #endif
 
 // Plain casting (no conversion)
